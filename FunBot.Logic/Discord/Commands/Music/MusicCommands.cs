@@ -34,7 +34,7 @@ namespace FunBot.Logic.Discord.Commands.Music
             return (Lava: lava, NodeConnection: node);
         }
 
-        private static async Task JoinAsync(InteractionContext ctx)
+        private static async Task<LavalinkGuildConnection> JoinAsync(InteractionContext ctx)
         {
             try
             {
@@ -43,15 +43,11 @@ namespace FunBot.Logic.Discord.Commands.Music
                 var checkUserVoice = await CheckUserVoiceStateAsync(ctx);
                 var conn = await NodeConnection.ConnectAsync(ctx.Member.VoiceState.Channel);
 
-                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                    new DiscordInteractionResponseBuilder()
-                    .WithContent("Вход..."));
+                return conn;
             }
             catch (Exception ex)
             {
-                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                    new DiscordInteractionResponseBuilder()
-                    .WithContent($"Не удалось войти в голосовой чат."));
+                throw new NotConnectedToGuildException();
             }
         }
 
@@ -66,7 +62,7 @@ namespace FunBot.Logic.Discord.Commands.Music
             return conn;
         }
 
-        public static async Task LeaveAsync(InteractionContext ctx)
+        private static async Task LeaveAsync(InteractionContext ctx)
         {
             try
             {
@@ -82,16 +78,10 @@ namespace FunBot.Logic.Discord.Commands.Music
                 var conn = NodeConnection.GetGuildConnection(userVoiceChannel.Guild);
 
                 await conn.DisconnectAsync();
-
-                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                    new DiscordInteractionResponseBuilder()
-                    .WithContent("Выход..."));
             }
             catch (Exception ex)
             {
-                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                    new DiscordInteractionResponseBuilder()
-                    .WithContent("Не удалось покинуть голосовой канал"));
+                throw new NotConnectedToGuildException();
             }
         }
 
@@ -142,8 +132,8 @@ namespace FunBot.Logic.Discord.Commands.Music
         [Category("Music")]
         [SlashCommand("play", "Поиск треков и их воспроизведение")]
         public async Task Play(InteractionContext ctx,
-            [Option("Название:", "Название трека")][RemainingText] string search,
-            [Option("Источник:", "Выбор источника воспроизведения")] LavalinkSearchType lavalinkSearch = LavalinkSearchType.Youtube)
+            [Option("Название", "Название трека")][RemainingText] string search,
+            [Option("Источник", "Выбор источника воспроизведения")] LavalinkSearchType lavalinkSearch = LavalinkSearchType.Youtube)
         {
             try
             {
@@ -151,16 +141,21 @@ namespace FunBot.Logic.Discord.Commands.Music
 
                 var (Lava, NodeConnection) = GetNodeConnection(ctx);
                 var checkResult = await CheckUserVoiceStateAsync(ctx);
-                var tracks = await LoadLavalinkTracksAsync(NodeConnection,
+                if (!checkResult)
+                {
+                    return;
+                }
+
+                _musicTracks = (await LoadLavalinkTracksAsync(NodeConnection,
                     search,
-                    lavalinkSearch);
+                    lavalinkSearch)).ToList();
 
                 var contentStr = "Выберите трек из списка:\n";
 
                 var trackButtons = new List<DiscordComponent>();
                 var counter = 1;
 
-                foreach (var track in tracks)
+                foreach (var track in _musicTracks)
                 {
                     contentStr += $"{counter} \"{track.Title} {track.Length}\"\n";
 
@@ -224,7 +219,7 @@ namespace FunBot.Logic.Discord.Commands.Music
                     return;
                 }
 
-                var conn = node.GetGuildConnection(guild);
+                var conn = await node.ConnectAsync(userVoiceChannel.Value);
                 if (conn is null || !conn.IsConnected)
                 {
                     throw new NotConnectedToGuildException();
@@ -260,22 +255,18 @@ namespace FunBot.Logic.Discord.Commands.Music
             }
         }
 
-
         [Category("Music")]
         [SlashCommand("playByUrl", "Поиск треков по ссылке и их воспроизведение")]
-        public async Task Play(InteractionContext ctx, [Option("адрес:", "Ссылка.")] string url)
+        public async Task Play(InteractionContext ctx, [Option("Ссылка", "Ссылка.")] string url)
         {
             try
             {
-                var (Lava, NodeConnection) = GetNodeConnection(ctx);
-                var checkResult = await CheckUserVoiceStateAsync(ctx);
-                if (!checkResult)
-                {
-                    return;
-                }
+                var conn = await JoinAsync(ctx);
+                var track = await LoadLavalinkTracksAsync(conn.Node, new Uri(url));
 
-                var conn = GetGuildConnection(ctx, NodeConnection);
-                var track = await LoadLavalinkTracksAsync(NodeConnection, new Uri(url));
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent("Поиск..."));
 
                 await conn.PlayAsync(track);
 
@@ -285,10 +276,6 @@ namespace FunBot.Logic.Discord.Commands.Music
                         Color = DiscordColor.Red,
                         Title = $"Сейчас играет: {track.Title}\nAuthor: {track.Author}\nUrl:{track.Uri}"
                     });
-
-                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                    new DiscordInteractionResponseBuilder()
-                    .WithContent("Поиск..."));
             }
             catch (Exception ex)
             {
@@ -297,8 +284,6 @@ namespace FunBot.Logic.Discord.Commands.Music
                     .WithContent("Не удалось воспроизвести, попробуйте позже..."));
             }
         }
-
-
 
         [Category("Music")]
         [SlashCommand("pause", "Приостановление проигрывателя")]
@@ -375,9 +360,9 @@ namespace FunBot.Logic.Discord.Commands.Music
             }
         }
 
-        [Category("Volume")]
+        [Category("Music")]
         [SlashCommand("volume", "Приостановление проигрывателя")]
-        public async Task Volume(InteractionContext ctx, [Option("value", "volume value")] string volume)
+        public async Task Volume(InteractionContext ctx, [Option("Громкость", "значение")] string volume)
         {
             try
             {
@@ -406,7 +391,7 @@ namespace FunBot.Logic.Discord.Commands.Music
 
                     await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
                         new DiscordInteractionResponseBuilder()
-                        .WithContent("Настройка громкости"));
+                        .WithContent($"Выставлена громкость: {value}."));
                 }
                 else
                 {
@@ -421,6 +406,46 @@ namespace FunBot.Logic.Discord.Commands.Music
                 await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
                     new DiscordInteractionResponseBuilder()
                     .WithContent("Не удалось выставить громкость."));
+            }
+        }
+
+        [Category("Music")]
+        [SlashCommand("stop", "остановка воспроизведения")]
+        public async Task Volume(InteractionContext ctx)
+        {
+            try
+            {
+                var (Lava, NodeConnection) = GetNodeConnection(ctx);
+                var checkResult = await CheckUserVoiceStateAsync(ctx);
+                if (!checkResult)
+                {
+                    return;
+                }
+
+                var conn = GetGuildConnection(ctx, NodeConnection);
+
+                if (conn.CurrentState.CurrentTrack == null)
+                {
+                    await ctx.Client.SendMessageAsync(ctx.Channel,
+                        new DiscordMessageBuilder()
+                        .WithContent("Отсутствует трек"));
+
+                    return;
+                }
+
+                await conn.StopAsync();
+
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent("Отключение"));
+
+                await LeaveAsync(ctx);
+            }
+            catch (Exception ex)
+            {
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent("Не отключиться"));
             }
         }
     }
