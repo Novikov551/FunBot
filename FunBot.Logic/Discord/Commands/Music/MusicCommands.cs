@@ -5,6 +5,8 @@ using DSharpPlus.EventArgs;
 using DSharpPlus.Lavalink;
 using DSharpPlus.SlashCommands;
 using FunBot.Logic.Discord.Commands.Attributes;
+using System;
+using System.Xml.Linq;
 
 namespace FunBot.Logic.Discord.Commands.Music
 {
@@ -13,454 +15,416 @@ namespace FunBot.Logic.Discord.Commands.Music
     {
         private List<LavalinkTrack> _musicTracks;
 
-        [SlashCommand("join", "Join the bot in user voice channel")]
-        public async Task Join(InteractionContext ctx, [Option("Channel", "Голосовой канал:")] DiscordChannel channel)
+        private static (LavalinkExtension Lava, LavalinkNodeConnection NodeConnection) GetNodeConnection(InteractionContext context)
         {
-            var lava = ctx.Client.GetLavalink();
+            var lava = context.Client.GetLavalink();
+            if (lava is null)
+            {
+                throw new LavalinkNotRegisteredException();
+            }
+
             if (!lava.ConnectedNodes.Any())
             {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                   .WithContent("The Lavalink connection is not established"));
-
-                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                    new DiscordInteractionResponseBuilder()
-                   .WithContent("Join..."));
-
-                return;
+                throw new LavalinkConnectionNotEstablished();
             }
 
-            var node = lava.ConnectedNodes.Values.First();
-
-            if (channel.Type != ChannelType.Voice)
+            var node = lava.ConnectedNodes.Values.FirstOrDefault();
+            if (node is null)
             {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                   .WithContent("Not a valid voice channel."));
-
-                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                    new DiscordInteractionResponseBuilder()
-                   .WithContent("Join..."));
-
-                return;
+                throw new LavalinkConnectionNotEstablished();
             }
 
-            await node.ConnectAsync(channel);
-
-            await ctx.Client.SendMessageAsync(ctx.Channel,
-                    new DiscordMessageBuilder()
-                    .WithContent($"Joined {channel.Name}!"));
-
-            await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                    new DiscordInteractionResponseBuilder()
-                   .WithContent("Join..."));
-
+            return (lava, node);
         }
 
-        [SlashCommand("leave", "Leave the bot in user voice channel")]
-        public async Task Leave(InteractionContext ctx, [Option("Channel", "Голосовой канал:")] DiscordChannel channel)
+        private static async Task JoinAsync(InteractionContext ctx)
         {
-            var lava = ctx.Client.GetLavalink();
-            if (!lava.ConnectedNodes.Any())
+            try
             {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                    new DiscordMessageBuilder()
-                    .WithContent("The Lavalink connection is not established"));
+                var (Lava, NodeConnection) = GetNodeConnection(ctx);
+                var userVoiceChannel = ctx.Member.VoiceState.Channel;
+                var checkUserVoice = await CheckUserVoiceStateAsync(ctx);
+                var conn = await NodeConnection.ConnectAsync(ctx.Member.VoiceState.Channel);
 
                 await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
                     new DiscordInteractionResponseBuilder()
-                   .WithContent("Leave..."));
-
-                return;
+                    .WithContent("Вход..."));
             }
-
-            var node = lava.ConnectedNodes.Values.First();
-
-            if (channel.Type != ChannelType.Voice)
+            catch (Exception ex)
             {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                  new DiscordMessageBuilder()
-                  .WithContent("Not a valid voice channel."));
-
                 await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                   new DiscordInteractionResponseBuilder()
-                  .WithContent("Leave..."));
-
-                return;
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent($"Не удалось войти в голосовой чат."));
             }
+        }
 
-
+        private static LavalinkGuildConnection GetGuildConnection(InteractionContext ctx, LavalinkNodeConnection node)
+        {
             var conn = node.GetGuildConnection(ctx.Member.Guild);
-
-            if (conn == null)
+            if (conn is null)
             {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                  new DiscordMessageBuilder()
-                  .WithContent("Lavalink is not connected."));
+                throw new NotConnectedToGuildException();
+            }
+
+            return conn;
+        }
+
+        public static async Task LeaveAsync(InteractionContext ctx)
+        {
+            try
+            {
+                var (Lava, NodeConnection) = GetNodeConnection(ctx);
+                var userVoiceChannel = ctx.Member.VoiceState.Channel;
+                var result = await CheckUserVoiceStateAsync(ctx);
+
+                if (!result)
+                {
+                    return;
+                }
+
+                var conn = NodeConnection.GetGuildConnection(userVoiceChannel.Guild);
+
+                await conn.DisconnectAsync();
 
                 await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
                     new DiscordInteractionResponseBuilder()
-                   .WithContent("Leave..."));
+                    .WithContent("Выход..."));
+            }
+            catch (Exception ex)
+            {
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent("Не удалось покинуть голосовой канал"));
+            }
+        }
 
-                return;
+        private static async Task<bool> CheckUserVoiceStateAsync(InteractionContext ctx)
+        {
+            var userVoiceChannel = ctx.Member.VoiceState.Channel;
+
+            if (userVoiceChannel is null || userVoiceChannel.Type != ChannelType.Voice)
+            {
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent("Вы не в голосовом канале"));
+
+                return false;
             }
 
-            await conn.DisconnectAsync();
+            return true;
+        }
 
-            await ctx.Client.SendMessageAsync(ctx.Channel,
-                    new DiscordMessageBuilder()
-                  .WithContent($"Left {channel.Name}!"));
+        private static async Task<IReadOnlyCollection<LavalinkTrack>> LoadLavalinkTracksAsync(LavalinkNodeConnection node,
+            string search,
+            LavalinkSearchType lavalinkSearch)
+        {
+            var loadResult = await node.Rest.GetTracksAsync(search, lavalinkSearch);
 
-            await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource, new DiscordInteractionResponseBuilder()
-               .WithContent("Leave channel..."));
+            if (loadResult.LoadResultType == LavalinkLoadResultType.LoadFailed
+                || loadResult.LoadResultType == LavalinkLoadResultType.NoMatches)
+            {
+                throw FailedToLoadLavalinkTracksException();
+            }
+
+            return loadResult.Tracks.Take(5).ToList();
+        }
+
+        private static async Task<LavalinkTrack> LoadLavalinkTracksAsync(LavalinkNodeConnection nodeConnection, Uri uri)
+        {
+            var loadResult = await nodeConnection.Rest.GetTracksAsync(uri);
+
+            if (loadResult.LoadResultType == LavalinkLoadResultType.LoadFailed
+                || loadResult.LoadResultType == LavalinkLoadResultType.NoMatches)
+            {
+                throw FailedToLoadLavalinkTracksException();
+            }
+
+            return loadResult.Tracks.First();
         }
 
         [Category("Music")]
         [SlashCommand("play", "Поиск треков и их воспроизведение")]
         public async Task Play(InteractionContext ctx,
-            [Option("Search", "Название трека:")][RemainingText] string search,
-            [Option("SearchType", "Выбор источника воспроизведения:")] LavalinkSearchType lavalinkSearch = LavalinkSearchType.Youtube)
+            [Option("Название:", "Название трека")][RemainingText] string search,
+            [Option("Источник:", "Выбор источника воспроизведения")] LavalinkSearchType lavalinkSearch = LavalinkSearchType.Youtube)
         {
-            //Important to check the voice state itself first, 
-            //as it may throw a NullReferenceException if they don't have a voice state.
-            if (ctx.Member.VoiceState == null || ctx.Member.VoiceState.Channel == null)
+            try
+            {
+                ctx.Client.ComponentInteractionCreated += SelectMusicHandler;
+
+                var (Lava, NodeConnection) = GetNodeConnection(ctx);
+                var checkResult = await CheckUserVoiceStateAsync(ctx);
+                var tracks = await LoadLavalinkTracksAsync(NodeConnection,
+                    search,
+                    lavalinkSearch);
+
+                var contentStr = "Выберите трек из списка:\n";
+
+                var trackButtons = new List<DiscordComponent>();
+                var counter = 1;
+
+                foreach (var track in tracks)
+                {
+                    contentStr += $"{counter} \"{track.Title} {track.Length}\"\n";
+
+                    trackButtons.Add(new DiscordButtonComponent(ButtonStyle.Primary,
+                        track.Identifier,
+                        counter.ToString()));
+
+                    counter++;
+                }
+
+                var message = await ctx.Client.SendMessageAsync(ctx.Channel,
+                    new DiscordMessageBuilder()
+                    .WithContent(contentStr)
+                    .AddComponents(trackButtons));
+
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent("Поиск треков..."));
+            }
+            catch (Exception ex)
             {
                 await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
                     new DiscordInteractionResponseBuilder()
-                   .WithContent("Searching tracks..."));
-
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                   .WithContent("You are not in a voice channel."));
-
-                return;
+                    .WithContent("Не удалось выполнить поиск."));
             }
-
-            var lava = ctx.Client.GetLavalink();
-            var node = lava.ConnectedNodes.Values.First();
-            var conn = node.GetGuildConnection(ctx.Member.VoiceState.Guild);
-
-            if (node == null)
-            {
-                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                    new DiscordInteractionResponseBuilder()
-                   .WithContent("Searching tracks..."));
-
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                   .WithContent("Lavalink is not connected."));
-
-                return;
-            }
-
-            //We don't need to specify the search type here
-            //since it is YouTube by default.
-
-            var loadResult = await node.Rest.GetTracksAsync(search, lavalinkSearch);
-
-            //If something went wrong on Lavalink's end                          
-            if (loadResult.LoadResultType == LavalinkLoadResultType.LoadFailed
-                //or it just couldn't find anything.
-                || loadResult.LoadResultType == LavalinkLoadResultType.NoMatches)
-            {
-                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                    new DiscordInteractionResponseBuilder()
-                   .WithContent("Searching tracks..."));
-
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                   .WithContent($"Track search failed for {search}."));
-
-                return;
-            }
-
-            _musicTracks = new();
-
-            var tracks = loadResult.Tracks.Take(5);
-
-            _musicTracks.AddRange(tracks);
-
-            var contentStr = "Выберите трек из списка:\n";
-
-            var trackButtons = new List<DiscordComponent>();
-            var counter = 1;
-
-            await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                new DiscordInteractionResponseBuilder()
-               .WithContent("Searching tracks..."));
-
-            foreach (var track in tracks)
-            {
-                contentStr += $"{counter} \"{track.Title} {track.Length}\"\n";
-                trackButtons.Add(new DiscordButtonComponent(ButtonStyle.Primary,
-                    track.Identifier,
-                    counter.ToString()));
-                counter++;
-            }
-
-            var message = await ctx.Client.SendMessageAsync(ctx.Channel,
-                  new DiscordMessageBuilder()
-                  .WithContent(contentStr)
-                  .AddComponents(trackButtons));
-
-            ctx.Client.ComponentInteractionCreated += SelectMusicHandler;
         }
 
         private async Task SelectMusicHandler(DiscordClient sender,
             ComponentInteractionCreateEventArgs args)
         {
-            var user = args.User;
-            var userChannel = args.Guild.Channels.FirstOrDefault(c => c.Value.Type == ChannelType.Voice 
-            && c.Value.Users.FirstOrDefault(u=>u.Id == user.Id) is not null);
-
-            if (_musicTracks is null || !_musicTracks.Any())
+            try
             {
-                await args.Interaction.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                    new DiscordInteractionResponseBuilder()
-                   .WithContent("Start playing..."));
+                sender.ComponentInteractionCreated -= SelectMusicHandler;
+
+                var lava = sender.GetLavalink();
+                if (lava is null)
+                {
+                    throw new LavalinkNotRegisteredException();
+                }
+
+                if (!lava.ConnectedNodes.Any())
+                {
+                    throw new LavalinkConnectionNotEstablished();
+                }
+
+                var node = lava.ConnectedNodes.Values.FirstOrDefault();
+                if (node is null)
+                {
+                    throw new LavalinkConnectionNotEstablished();
+                }
+
+                var user = args.User;
+                var guild = args.Guild;
+                var userVoiceChannel = guild.Channels.FirstOrDefault(c => c.Value.Type == ChannelType.Voice && c.Value.Users.Contains(user));
+                if (userVoiceChannel.Value is null)
+                {
+                    await args.Interaction.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                        new DiscordInteractionResponseBuilder()
+                        .WithContent("Вы не в голосовом канале"));
+
+                    return;
+                }
+
+                var conn = node.GetGuildConnection(guild);
+                if (conn is null || !conn.IsConnected)
+                {
+                    throw new NotConnectedToGuildException();
+                }
+
+                if (_musicTracks is null || !_musicTracks.Any())
+                {
+                    throw new ArgumentOutOfRangeException(nameof(_musicTracks));
+                }
+
+                var track = _musicTracks.First(t => t.Identifier == args.Interaction.Data.CustomId);
+
+                await conn.PlayAsync(track);
+
+                _musicTracks = null;
 
                 await sender.SendMessageAsync(args.Channel,
-                    new DiscordMessageBuilder()
-                    .WithContent("Track not founded."));
-            }
+                    new DiscordEmbedBuilder()
+                    {
+                        Color = DiscordColor.Red,
+                        Title = $"Сейчас играет: {track.Title}\nAuthor: {track.Author}\nUrl:{track.Uri}"
+                    });
 
-            var lava = sender.GetLavalink();
-            var node = lava.ConnectedNodes.Values.First();
-
-            if (node == null)
-            {
                 await args.Interaction.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
                     new DiscordInteractionResponseBuilder()
-                   .WithContent("Start playing..."));
-
-                await sender.SendMessageAsync(args.Channel,
-                    new DiscordMessageBuilder()
-                    .WithContent("Lavalink is not connected."));
-
-                return;
+                    .WithContent("Запуск..."));
             }
-
-            await node.ConnectAsync(userChannel.Value);
-
-            var track = _musicTracks.FirstOrDefault(t => t.Identifier == args.Interaction.Data.CustomId);
-            if (track == null)
+            catch (Exception ex)
             {
-                await args.Interaction.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                    new DiscordInteractionResponseBuilder()
-                   .WithContent("Start playing..."));
-
                 await sender.SendMessageAsync(args.Channel,
                     new DiscordMessageBuilder()
                     .WithContent("Не удалось воспроизвести указанный трек, возможно он был удален, попробуйте другой."));
-
-                return;
             }
-
-            var conn = node.GetGuildConnection(userChannel.Value.Guild);
-            await conn.PlayAsync(track);
-            
-            await args.Interaction.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                new DiscordInteractionResponseBuilder()
-               .WithContent("Start playing..."));
-
-            await sender.SendMessageAsync(args.Channel,
-                new DiscordEmbedBuilder()
-                {
-                    Color = DiscordColor.Red,
-                    Title = $"Now playing: {track.Title}\nAuthor: {track.Author}\nUrl:{track.Uri}"
-                });
         }
 
-        
+
         [Category("Music")]
         [SlashCommand("playByUrl", "Поиск треков по ссылке и их воспроизведение")]
-        public async Task Play(InteractionContext ctx, [Option("Uri", "Ссылка:")] string url)
+        public async Task Play(InteractionContext ctx, [Option("адрес:", "Ссылка.")] string url)
         {
-            //Important to check the voice state itself first, 
-            //as it may throw a NullReferenceException if they don't have a voice state.
-            if (ctx.Member.VoiceState == null || ctx.Member.VoiceState.Channel == null)
+            try
             {
-                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                  new DiscordInteractionResponseBuilder()
-                 .WithContent("Searching track..."));
+                var (Lava, NodeConnection) = GetNodeConnection(ctx);
+                var checkResult = await CheckUserVoiceStateAsync(ctx);
+                if (!checkResult)
+                {
+                    return;
+                }
+
+                var conn = GetGuildConnection(ctx, NodeConnection);
+                var track = await LoadLavalinkTracksAsync(NodeConnection, new Uri(url));
+
+                await conn.PlayAsync(track);
 
                 await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                   .WithContent("You are not in a voice channel."));
+                    new DiscordEmbedBuilder()
+                    {
+                        Color = DiscordColor.Red,
+                        Title = $"Сейчас играет: {track.Title}\nAuthor: {track.Author}\nUrl:{track.Uri}"
+                    });
 
-                return;
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent("Поиск..."));
             }
-
-            var lava = ctx.Client.GetLavalink();
-            var node = lava.ConnectedNodes.Values.First();
-            var conn = node.GetGuildConnection(ctx.Member.VoiceState.Guild);
-
-            if (conn == null)
+            catch (Exception ex)
             {
                 await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                  new DiscordInteractionResponseBuilder()
-                 .WithContent("Searching track..."));
-
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                  new DiscordMessageBuilder()
-                  .WithContent("Lavalink is not connected."));
-
-                return;
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent("Не удалось воспроизвести, попробуйте позже..."));
             }
-
-            //We don't need to specify the search type here
-            //since it is YouTube by default.
-            var loadResult = await node.Rest.GetTracksAsync(new Uri(url));
-
-            //If something went wrong on Lavalink's end                          
-            if (loadResult.LoadResultType == LavalinkLoadResultType.LoadFailed
-                //or it just couldn't find anything.
-                || loadResult.LoadResultType == LavalinkLoadResultType.NoMatches)
-            {
-                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                  new DiscordInteractionResponseBuilder()
-                 .WithContent("Searching track..."));
-
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                  new DiscordMessageBuilder()
-                  .WithContent($"Track search failed for {url}."));
-
-                return;
-            }
-
-            var track = loadResult.Tracks.First();
-
-            await conn.PlayAsync(track);
-
-            await ctx.Client.SendMessageAsync(ctx.Channel,
-                  new DiscordMessageBuilder()
-                  .WithContent($"Now playing {track.Title}!"));
-
-            await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
-                 new DiscordInteractionResponseBuilder()
-                 .WithContent("Searching track..."));
         }
+
+
 
         [Category("Music")]
         [SlashCommand("pause", "Приостановление проигрывателя")]
         public async Task Pause(InteractionContext ctx)
         {
-            await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource, new DiscordInteractionResponseBuilder()
-              .WithContent("Pause track..."));
-
-            if (ctx.Member.VoiceState == null || ctx.Member.VoiceState.Channel == null)
+            try
             {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                   .WithContent("You are not in a voice channel."));
+                var (Lava, NodeConnection) = GetNodeConnection(ctx);
+                var checkResult = await CheckUserVoiceStateAsync(ctx);
+                if (!checkResult)
+                {
+                    return;
+                }
 
-                return;
+                var conn = GetGuildConnection(ctx, NodeConnection);
+
+                if (conn.CurrentState.CurrentTrack == null)
+                {
+                    await ctx.Client.SendMessageAsync(ctx.Channel,
+                        new DiscordMessageBuilder()
+                        .WithContent("В данный момент не воспроизводится трек"));
+
+                    return;
+                }
+
+                await conn.PauseAsync();
+
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent("Пауза"));
             }
-
-            var lava = ctx.Client.GetLavalink();
-            var node = lava.ConnectedNodes.Values.First();
-            var conn = node.GetGuildConnection(ctx.Member.VoiceState.Guild);
-
-            if (conn == null)
+            catch (Exception ex)
             {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                  .WithContent("Lavalink is not connected."));
-
-                return;
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource, new DiscordInteractionResponseBuilder()
+                    .WithContent("Не удалось приостановить вопсроизведение"));
             }
-
-            if (conn.CurrentState.CurrentTrack == null)
-            {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                  new DiscordMessageBuilder()
-                  .WithContent("There are no tracks loaded."));
-
-                return;
-            }
-
-            await conn.PauseAsync();
         }
 
         [Category("Music")]
         [SlashCommand("resume", "Продолжение")]
         public async Task Resume(InteractionContext ctx)
         {
-            await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource, new DiscordInteractionResponseBuilder()
-              .WithContent("Resume track..."));
-
-            if (ctx.Member.VoiceState == null || ctx.Member.VoiceState.Channel == null)
+            try
             {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                   .WithContent("You are not in a voice channel."));
+                var (Lava, NodeConnection) = GetNodeConnection(ctx);
+                var checkResult = await CheckUserVoiceStateAsync(ctx);
+                if (!checkResult)
+                {
+                    return;
+                }
 
-                return;
+                var conn = GetGuildConnection(ctx, NodeConnection);
+
+                if (conn.CurrentState.CurrentTrack == null)
+                {
+                    await ctx.Client.SendMessageAsync(ctx.Channel,
+                        new DiscordMessageBuilder()
+                        .WithContent("Отсутствует трек"));
+
+                    return;
+                }
+
+                await conn.ResumeAsync();
+
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent("Запуск"));
             }
-
-            var lava = ctx.Client.GetLavalink();
-            var node = lava.ConnectedNodes.Values.First();
-            var conn = node.GetGuildConnection(ctx.Member.VoiceState.Guild);
-
-            if (conn == null)
+            catch (Exception ex)
             {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                  .WithContent("Lavalink is not connected."));
-
-                return;
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent("Не удалось продолжить вопсроизведение"));
             }
-
-            if (conn.CurrentState.CurrentTrack == null)
-            {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                  new DiscordMessageBuilder()
-                  .WithContent("There are no tracks loaded."));
-
-                return;
-            }
-
-            await conn.ResumeAsync();
         }
 
         [Category("Volume")]
         [SlashCommand("volume", "Приостановление проигрывателя")]
         public async Task Volume(InteractionContext ctx, [Option("value", "volume value")] string volume)
         {
-            await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource, new DiscordInteractionResponseBuilder()
-              .WithContent("Set volume..."));
-
-            if (ctx.Member.VoiceState == null || ctx.Member.VoiceState.Channel == null)
+            try
             {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                   .WithContent("You are not in a voice channel."));
+                var (Lava, NodeConnection) = GetNodeConnection(ctx);
+                var checkResult = await CheckUserVoiceStateAsync(ctx);
+                if (!checkResult)
+                {
+                    return;
+                }
 
-                return;
+                var conn = GetGuildConnection(ctx, NodeConnection);
+
+                if (conn.CurrentState.CurrentTrack == null)
+                {
+                    await ctx.Client.SendMessageAsync(ctx.Channel,
+                        new DiscordMessageBuilder()
+                        .WithContent("Отсутствует трек"));
+
+                    return;
+                }
+
+                if (int.TryParse(volume, out var value))
+                {
+
+                    await conn.SetVolumeAsync(value);
+
+                    await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                        new DiscordInteractionResponseBuilder()
+                        .WithContent("Настройка громкости"));
+                }
+                else
+                {
+                    await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                        new DiscordInteractionResponseBuilder()
+                        .WithContent("Не удалось выставить громкость."));
+                }
+
             }
-
-            var lava = ctx.Client.GetLavalink();
-            var node = lava.ConnectedNodes.Values.First();
-            var conn = node.GetGuildConnection(ctx.Member.VoiceState.Guild);
-
-            if (conn == null)
+            catch (Exception ex)
             {
-                await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                  .WithContent("You not in voice channel."));
-
-                return;
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource,
+                    new DiscordInteractionResponseBuilder()
+                    .WithContent("Не удалось выставить громкость."));
             }
-
-            await ctx.Client.SendMessageAsync(ctx.Channel,
-                   new DiscordMessageBuilder()
-                  .WithContent($"Volume now: {volume}"));
-
-            var value = int.Parse(volume);
-
-            await conn.SetVolumeAsync(value);
         }
-
-
     }
 }
