@@ -5,6 +5,7 @@ using DSharpPlus.EventArgs;
 using DSharpPlus.Lavalink;
 using DSharpPlus.SlashCommands;
 using FunBot.Logic.Discord.Commands.Attributes;
+using FunBot.Logic.Exceptions.Lavalink;
 using System;
 using System.Xml.Linq;
 
@@ -29,12 +30,8 @@ namespace FunBot.Logic.Discord.Commands.Music
             }
 
             var node = lava.ConnectedNodes.Values.FirstOrDefault();
-            if (node is null)
-            {
-                throw new LavalinkConnectionNotEstablished();
-            }
 
-            return (lava, node);
+            return (Lava: lava, NodeConnection: node);
         }
 
         private static async Task JoinAsync(InteractionContext ctx)
@@ -123,7 +120,7 @@ namespace FunBot.Logic.Discord.Commands.Music
             if (loadResult.LoadResultType == LavalinkLoadResultType.LoadFailed
                 || loadResult.LoadResultType == LavalinkLoadResultType.NoMatches)
             {
-                throw FailedToLoadLavalinkTracksException();
+                throw new FailedToLoadLavalinkTracksException();
             }
 
             return loadResult.Tracks.Take(5).ToList();
@@ -136,7 +133,7 @@ namespace FunBot.Logic.Discord.Commands.Music
             if (loadResult.LoadResultType == LavalinkLoadResultType.LoadFailed
                 || loadResult.LoadResultType == LavalinkLoadResultType.NoMatches)
             {
-                throw FailedToLoadLavalinkTracksException();
+                throw new FailedToLoadLavalinkTracksException();
             }
 
             return loadResult.Tracks.First();

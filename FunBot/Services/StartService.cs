@@ -31,8 +31,6 @@ namespace FunBot.Services
 
             _logger.LogInformation("Connect to the lavalink");
             await lavalinkConnection.ConnectAsync();
-
-            await Task.Delay(-1);
         }
 
         public async Task StopAsync(CancellationToken cancellationToken)
